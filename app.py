@@ -1,23 +1,27 @@
 import os
-from flask import Flask
+import json
+from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# 1. Initialize Flask app for Render's web hosting requirement
+# 1. Initialize Flask
 app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return "QuickpickBot is running!"
-
-# 2. Telegram Bot Logic
-# A simple mock database of alternative products
+# Mock database of alternative products
 PRODUCT_MATCHES = {
     "iphone": ["Samsung Galaxy S24", "Google Pixel 8", "OnePlus 12"],
     "shoes": ["Nike Air Max", "Adidas Ultraboost", "Puma Cali"],
     "laptop": ["MacBook Air M3", "Dell XPS 13", "Lenovo ThinkPad X1"]
 }
 
+# 2. Initialize Telegram Application globally (without starting it yet)
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+# RENDER_EXTERNAL_URL is automatically provided by Render
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL") 
+
+telegram_app = Application.builder().token(TOKEN).build()
+
+# 3. Define Bot Command & Message Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a greeting when the command /start is issued."""
     await update.message.reply_text(
@@ -50,28 +54,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Try typing a general category like 'shoes', 'iphone', or 'laptop'!"
         )
 
-# 3. Main runner
-def main():
-    TOKEN = os.environ.get("TELEGRAM_TOKEN")
-    if not TOKEN:
-        print("Error: No TELEGRAM_TOKEN provided.")
-        return
+# Register handlers to the application
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Build the Telegram Application
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+# 4. Flask Routes
+@app.route('/')
+def home():
+    return "QuickpickBot Webhook Server is Live!"
 
-    # Start polling for messages
-    print("Bot is polling...")
-    application.run_polling()
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    """Endpoint that receives updates from Telegram and processes them."""
+    if request.method == "POST":
+        try:
+            # Parse the update JSON from Telegram
+            json_string = request.get_data().decode('utf-8')
+            update = Update.de_json(json.loads(json_string), telegram_app.bot)
+            
+            # Feed the update into the telegram application framework
+            await telegram_app.initialize()
+            await telegram_app.process_update(update)
+            return jsonify({"status": "success"}), 200
+        except Exception as e:
+            print(f"Error processing update: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/set_webhook', methods=['GET', 'POST'])
+async def set_webhook():
+    """Helper route to register your Render URL with Telegram."""
+    if not TOKEN or not RENDER_URL:
+        return "Error: Missing configuration environment variables.", 400
+    
+    # Target URL Telegram will send messages to
+    webhook_url = f"{RENDER_URL.rstrip('/')}/webhook"
+    
+    await telegram_app.initialize()
+    success = await telegram_app.bot.set_webhook(url=webhook_url)
+    
+    if success:
+        return f"Success: Webhook pointed to {webhook_url}", 200
+    else:
+        return "Failed to set webhook.", 500
 
 if __name__ == '__main__':
-    # When running locally, you can run main() directly.
-    # For Render, we rely on the background worker or a split setup.
-    import threading
-    # Run the Telegram bot in a background thread
-    threading.Thread(target=main, daemon=True).start()
-    # Run the Flask app on the port Render gives us
+    # Used only for local testing
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
